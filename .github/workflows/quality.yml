@@ -1,0 +1,37 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Lint Markdown
+        run: npx --yes markdownlint-cli2@0.24.0 "**/*.md"
+
+  kql-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check platform labels
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' file; do
+            if ! grep -Eq '^// Platform: (Microsoft Sentinel / Log Analytics|Microsoft Defender XDR / Advanced Hunting|Azure Data Explorer|Multiple)$' "$file"; then
+              echo "Missing or invalid // Platform header: $file"
+              status=1
+            fi
+          done < <(find . -type f -name '*.kql' -print0)
+          exit "$status"
