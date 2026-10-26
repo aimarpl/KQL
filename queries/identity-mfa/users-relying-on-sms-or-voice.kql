@@ -1,0 +1,85 @@
+// Title: Users relying only on SMS or voice
+// Platform: Microsoft Sentinel / Log Analytics
+// Category: Identity - MFA
+// Tags: entra-id, mfa, sms, voice, phishing-resistant, migration
+// Description: Lists users who completed MFA with SMS or voice and never used a
+//   stronger method in the period. This is the migration worklist: everyone
+//   here needs onboarding to an authenticator app, passkey or Windows Hello.
+// Data sources: SigninLogs
+// Parameters: StartTime, EndTime
+// Notes: Classifies every method before filtering. Dropping strong-method rows
+//   first makes a user who also uses Windows Hello look SMS-only, which is the
+//   most common way this report produces false positives.
+
+let StartTime = ago(30d);
+let EndTime = now();
+SigninLogs
+| where TimeGenerated between (StartTime .. EndTime)
+// ResultType 0 is a fully successful sign-in. Without this a user who only ever
+// failed an SMS prompt appears to be an active SMS user.
+| where ResultType == "0"
+| where isnotempty(UserId)
+| where isnotempty(AuthenticationDetails)
+| mv-expand AuthStep = parse_json(AuthenticationDetails)
+| where tobool(AuthStep.succeeded) == true
+| extend RawMethod = trim(@"\s+", tostring(AuthStep.authenticationMethod))
+| where isnotempty(RawMethod)
+| extend MethodGroup = case(
+    RawMethod in~ ("Text message", "SMS"), "SMS",
+    RawMethod in~ (
+        "Phone call approval (Authentication phone)",
+        "Phone call approval (Alternate phone)",
+        "Voice call"
+    ), "Voice",
+    // Every method stronger than a phone factor. Keep this list complete:
+    // anything missing here is silently treated as a weak-only user.
+    RawMethod in~ (
+        "Mobile app notification",
+        "Companion mobile app notification",
+        "Passwordless Microsoft Authenticator",
+        "Passwordless phone sign-in",
+        "Microsoft Authenticator push notification",
+        "Mobile app verification code",
+        "OATH verification code",
+        "Hardware OATH token",
+        "Software OATH token",
+        "Windows Hello for Business",
+        "Windows Hello",
+        "FIDO2 security key",
+        "Fido Key",
+        "Passkey (device-bound)",
+        "Passkey",
+        "X.509 Certificate",
+        "Certificate-based authentication"
+    ), "Strong",
+    // Password and "Previously satisfied" are the primary factor or a cached
+    // claim. They are neither weak MFA nor strong MFA, so they are ignored.
+    RawMethod in~ ("Password", "Previously satisfied"), "Primary",
+    "Unclassified"
+)
+// Aggregate across ALL method groups so a strong method anywhere in the period
+// is counted. Filtering to SMS and Voice before this point is the bug.
+| summarize
+    SmsSteps = countif(MethodGroup == "SMS"),
+    VoiceSteps = countif(MethodGroup == "Voice"),
+    StrongSteps = countif(MethodGroup == "Strong"),
+    UnclassifiedMethods = make_set_if(RawMethod, MethodGroup == "Unclassified", 10),
+    WeakMethods = make_set_if(RawMethod, MethodGroup in ("SMS", "Voice"), 10),
+    LastWeakUse = maxif(TimeGenerated, MethodGroup in ("SMS", "Voice")),
+    UserPrincipalName = take_any(UserPrincipalName),
+    DisplayName = take_any(Identity)
+    by UserId
+| where StrongSteps == 0
+| where SmsSteps + VoiceSteps > 0
+| project
+    UserPrincipalName,
+    DisplayName,
+    WeakMethods,
+    SmsSteps,
+    VoiceSteps,
+    LastWeakUse,
+    // Review any value here before acting: an unrecognised method name means
+    // the Strong list above needs updating, not that the user is weak-only.
+    UnclassifiedMethods,
+    UserId
+| order by SmsSteps + VoiceSteps desc

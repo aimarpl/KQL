@@ -1,0 +1,62 @@
+// Title: Authentication method usage summary
+// Platform: Microsoft Sentinel / Log Analytics
+// Category: Identity - MFA
+// Tags: entra-id, mfa, authentication-methods, adoption
+// Description: Counts successful authentication steps by method group, with the
+//   number of distinct users per method. Use it to see which methods are
+//   actually in use across the tenant before planning a migration.
+// Data sources: SigninLogs
+// Parameters: StartTime, EndTime, IncludePrimaryFactors
+// Notes: Counts users by UserId (object ID), not display name. Display names
+//   are not unique, so counting them merges distinct people.
+
+let StartTime = ago(30d);
+let EndTime = now();
+// Password and "Previously satisfied" describe the primary factor or a cached
+// MFA claim rather than a method the user actively used. Set to true to include
+// them when auditing primary factors rather than MFA adoption.
+let IncludePrimaryFactors = false;
+let PrimaryFactors = dynamic(["Password", "Previously satisfied"]);
+SigninLogs
+| where TimeGenerated between (StartTime .. EndTime)
+| where isnotempty(AuthenticationDetails)
+| mv-expand AuthStep = parse_json(AuthenticationDetails)
+// Each sign-in records one entry per authentication step. Keep only the steps
+// that succeeded, otherwise a failed prompt counts as the method being in use.
+| where tobool(AuthStep.succeeded) == true
+| extend RawMethod = trim(@"\s+", tostring(AuthStep.authenticationMethod))
+| where isnotempty(RawMethod)
+| where IncludePrimaryFactors or RawMethod !in~ (PrimaryFactors)
+| extend MethodGroup = case(
+    RawMethod in~ ("Text message", "SMS"), "SMS",
+    RawMethod in~ (
+        "Phone call approval (Authentication phone)",
+        "Phone call approval (Alternate phone)",
+        "Voice call"
+    ), "Voice",
+    RawMethod in~ (
+        "Mobile app notification",
+        "Companion mobile app notification",
+        "Passwordless Microsoft Authenticator",
+        "Passwordless phone sign-in",
+        "Microsoft Authenticator push notification"
+    ), "Authenticator app",
+    RawMethod in~ ("Mobile app verification code", "OATH verification code",
+                   "Hardware OATH token", "Software OATH token"), "OATH code",
+    RawMethod in~ ("Windows Hello for Business", "Windows Hello"), "Windows Hello for Business",
+    RawMethod in~ ("FIDO2 security key", "Fido Key", "Passkey (device-bound)",
+                   "Passkey"), "Passkey / FIDO2",
+    RawMethod in~ ("X.509 Certificate", "Certificate-based authentication"), "Certificate",
+    RawMethod
+)
+| summarize
+    SuccessfulSteps = count(),
+    SignIns = dcount(Id),
+    Users = dcount(UserId)
+    by MethodGroup
+| extend UserShare = round(100.0 * Users / toscalar(
+    SigninLogs
+    | where TimeGenerated between (StartTime .. EndTime)
+    | where isnotempty(UserId)
+    | summarize dcount(UserId)), 1)
+| order by Users desc

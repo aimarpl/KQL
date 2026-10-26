@@ -1,0 +1,69 @@
+// Title: Users of a selected authentication method
+// Platform: Microsoft Sentinel / Log Analytics
+// Category: Identity - MFA
+// Tags: entra-id, mfa, authentication-methods, per-user, drilldown
+// Description: Lists the users who successfully used one chosen method group,
+//   with how often they used it and when they last did. Use it to drill into a
+//   row returned by authentication-method-usage.kql.
+// Data sources: SigninLogs
+// Parameters: StartTime, EndTime, SelectedMethod
+// Notes: Set SelectedMethod to one of the MethodGroup values below. This
+//   replaces having one near-identical query per method; change the parameter
+//   rather than copying the file.
+
+let StartTime = ago(30d);
+let EndTime = now();
+// One of: "SMS", "Voice", "Authenticator app", "OATH code",
+//         "Windows Hello for Business", "Passkey / FIDO2", "Certificate"
+let SelectedMethod = "SMS";
+SigninLogs
+| where TimeGenerated between (StartTime .. EndTime)
+| where ResultType == "0"
+| where isnotempty(UserId)
+| where isnotempty(AuthenticationDetails)
+| mv-expand AuthStep = parse_json(AuthenticationDetails)
+| where tobool(AuthStep.succeeded) == true
+| extend RawMethod = trim(@"\s+", tostring(AuthStep.authenticationMethod))
+| where isnotempty(RawMethod)
+| extend MethodGroup = case(
+    RawMethod in~ ("Text message", "SMS"), "SMS",
+    RawMethod in~ (
+        "Phone call approval (Authentication phone)",
+        "Phone call approval (Alternate phone)",
+        "Voice call"
+    ), "Voice",
+    RawMethod in~ (
+        "Mobile app notification",
+        "Companion mobile app notification",
+        "Passwordless Microsoft Authenticator",
+        "Passwordless phone sign-in",
+        "Microsoft Authenticator push notification"
+    ), "Authenticator app",
+    RawMethod in~ ("Mobile app verification code", "OATH verification code",
+                   "Hardware OATH token", "Software OATH token"), "OATH code",
+    RawMethod in~ ("Windows Hello for Business", "Windows Hello"), "Windows Hello for Business",
+    RawMethod in~ ("FIDO2 security key", "Fido Key", "Passkey (device-bound)",
+                   "Passkey"), "Passkey / FIDO2",
+    RawMethod in~ ("X.509 Certificate", "Certificate-based authentication"), "Certificate",
+    RawMethod
+)
+| where MethodGroup == SelectedMethod
+| summarize
+    SuccessfulSteps = count(),
+    SignIns = dcount(Id),
+    MethodVariants = make_set(RawMethod, 10),
+    FirstUse = min(TimeGenerated),
+    LastUse = max(TimeGenerated),
+    UserPrincipalName = take_any(UserPrincipalName),
+    DisplayName = take_any(Identity)
+    by UserId
+| project
+    UserPrincipalName,
+    DisplayName,
+    SuccessfulSteps,
+    SignIns,
+    MethodVariants,
+    FirstUse,
+    LastUse,
+    UserId
+| order by SuccessfulSteps desc

@@ -4,34 +4,30 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   markdown:
+    name: Markdown lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 20
       - name: Lint Markdown
-        run: npx --yes markdownlint-cli2@0.24.0 "**/*.md"
+        run: npx --yes markdownlint-cli2 "**/*.md"
 
   kql-metadata:
+    name: KQL metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: Check platform labels
-        shell: bash
-        run: |
-          set -euo pipefail
-          status=0
-          while IFS= read -r -d '' file; do
-            if ! grep -Eq '^// Platform: (Microsoft Sentinel / Log Analytics|Microsoft Defender XDR / Advanced Hunting|Azure Data Explorer|Multiple)$' "$file"; then
-              echo "Missing or invalid // Platform header: $file"
-              status=1
-            fi
-          done < <(find . -type f -name '*.kql' -print0)
-          exit "$status"
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate query headers
+        run: python3 tools/validate-kql-metadata.py queries
